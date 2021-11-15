@@ -1,11 +1,12 @@
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
+import numpy as np
 
 
 class ConvLSTMCell(nn.Module):
 
-    def __init__(self, input_dim, hidden_dim, kernel_size, bias):
+    def __init__(self, input_dim, hidden_dim, kernel_size, stride, bias):
         """
         Initialize ConvLSTM cell.
 
@@ -27,21 +28,34 @@ class ConvLSTMCell(nn.Module):
         self.hidden_dim = hidden_dim
 
         self.kernel_size = kernel_size
-        self.padding = kernel_size[0] // 2, kernel_size[1] // 2
+        self.stride = stride
+        # self.padding = kernel_size[0] // 2, kernel_size[1] // 2
+        self.padding = 0, 0
         self.bias = bias
 
-        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
-                              out_channels=4 * self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
+        self.conv_input = nn.Conv2d(in_channels=self.input_dim,
+                                    out_channels=4 * self.hidden_dim,
+                                    kernel_size=self.kernel_size,
+                                    stride=self.stride,
+                                    padding=self.padding,
+                                    bias=self.bias)
+
+        self.conv_h = nn.Conv2d(in_channels=self.hidden_dim,
+                                out_channels=4 * self.hidden_dim,
+                                kernel_size=self.kernel_size,
+                                padding='same',
+                                bias=self.bias)
 
     def forward(self, input_tensor, cur_state):
         h_cur, c_cur = cur_state
 
-        combined = torch.cat([input_tensor, h_cur], dim=1)  # concatenate along channel axis
+        # combined = torch.cat([input_tensor, h_cur], dim=1)  # concatenate along channel axis
 
-        combined_conv = self.conv(combined)
+        input_conv = self.conv_input(input_tensor)
+        h_conv = self.conv_h(h_cur)
+        print('h', h_conv.shape)
+        print('input', input_conv.shape)
+        combined_conv = input_conv + h_conv
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
         i = torch.sigmoid(cc_i)
         f = torch.sigmoid(cc_f)
@@ -55,8 +69,12 @@ class ConvLSTMCell(nn.Module):
 
     def init_hidden(self, batch_size, image_size):
         height, width = image_size
-        return (torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device),
-                torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device))
+        output_height = int((height + 2 * self.padding[0] - self.kernel_size[0]) / self.stride[0] + 1)
+        output_width = int((width + 2 * self.padding[1] - self.kernel_size[1]) / self.stride[1] + 1)
+
+        return (torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
+                torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
+                output_height, output_width)
 
 
 class ConvLSTM(nn.Module):
@@ -70,7 +88,7 @@ class ConvLSTM(nn.Module):
         batch_first: Whether or not dimension 0 is the batch or not
         bias: Bias or no bias in Convolution
         return_all_layers: Return the list of computations for all layers
-        Note: Will do same padding.
+    Note: Will do same padding.
 
     Input:
         A tensor of size B, T, C, H, W or T, B, C, H, W
@@ -86,7 +104,7 @@ class ConvLSTM(nn.Module):
         >> h = last_states[0][0]  # 0 for layer index, 0 for h index
     """
 
-    def __init__(self, input_dim, hidden_dim, kernel_size, num_layers,
+    def __init__(self, input_dim, hidden_dim, kernel_size, stride, num_layers,
                  batch_first=False, bias=True, return_all_layers=False):
         super(ConvLSTM, self).__init__()
 
@@ -101,6 +119,7 @@ class ConvLSTM(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.kernel_size = kernel_size
+        self.stride = stride
         self.num_layers = num_layers
         self.batch_first = batch_first
         self.bias = bias
@@ -113,6 +132,7 @@ class ConvLSTM(nn.Module):
             cell_list.append(ConvLSTMCell(input_dim=cur_input_dim,
                                           hidden_dim=self.hidden_dim[i],
                                           kernel_size=self.kernel_size[i],
+                                          stride=self.stride[i],
                                           bias=self.bias))
 
         self.cell_list = nn.ModuleList(cell_list)
@@ -175,7 +195,9 @@ class ConvLSTM(nn.Module):
     def _init_hidden(self, batch_size, image_size):
         init_states = []
         for i in range(self.num_layers):
-            init_states.append(self.cell_list[i].init_hidden(batch_size, image_size))
+            h, c, height, width = self.cell_list[i].init_hidden(batch_size, image_size)
+            image_size = (height, width)
+            init_states.append((h, c))
         return init_states
 
     @staticmethod
@@ -193,27 +215,84 @@ class ConvLSTM(nn.Module):
 
 class ActionDetect(nn.Module):
     def __init__(self, sequence_size=3):
-        super().__init__()
+        super(ActionDetect, self).__init__()
         self.sequence_size = sequence_size
         # TODO added depth image as 4th channel
         self.conv1 = nn.Conv2d(4, 32, kernel_size=(3, 3), stride=(2, 2))
         # TODO regularization for kernel, torch.norm(model.layer.weight, p=2)
-        self.conv2 = nn.Conv2d(32, 16, kernel_size=(3, 3), stride=(2, 2))
+        self.conv2 = nn.Conv2d(32, 16, kernel_size=(2, 2), stride=(2, 2))
         self.pooling1 = nn.AvgPool2d((2, 2), (1, 1))
         self.convlstm = ConvLSTM(input_dim=16,
                                  hidden_dim=[20, 5],
-                                 kernel_size=(3, 3),
+                                 kernel_size=[(2, 2), (2, 2)],
+                                 stride=[(3, 3), (3, 3)],
                                  num_layers=2,
                                  batch_first=False,
                                  bias=True,
                                  return_all_layers=False)
+        self.fc = nn.Linear(1170, 4)
 
-    def forward(self, inputs):
+    def forward(self, inputs, state_tensor=None):
         # TODO check the size of inputs, currently assume (batch_size, sequence_size, C, H, W)
         conv_outputs = []
         for i in range(self.sequence_size):
-            output1 = F.relu(self.conv1(inputs[:, i]))
+            output1 = F.relu(self.conv1(inputs[:, i, :, :, :]))
             output2 = F.relu(self.conv2(output1))
             conv_outputs.append(self.pooling1(output2))
-        conv_outputs = torch.tensor(conv_outputs)
-        self.convlstm(conv_outputs)
+        conv_outputs = torch.stack(conv_outputs)
+        _, convlstm_outputs = self.convlstm(conv_outputs)
+        convlstm_h, convlstm_c = convlstm_outputs[0]
+        # convlstm_outputs = torch.cat([convlstm_outputs, state_tensor], dim=1)
+        convlstm_h = torch.flatten(convlstm_h, start_dim=1)
+        outputs = F.softmax(self.fc(convlstm_h), dim=1)
+        return outputs
+
+
+class StateDetect(nn.Module):
+    def __init__(self):
+        super(StateDetect, self).__init__()
+        self.conv1 = nn.Conv2d(4, 32, kernel_size=(3, 9), stride=1)
+        self.pool1 = nn.MaxPool2d(4, 3)
+        self.conv2 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.conv3 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.pool2 = nn.MaxPool2d(2, 3)
+        self.conv4 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.conv5 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.pool3 = nn.MaxPool2d(2, 2)
+
+        self.fc1_1 = nn.Linear((32 * 24 * 24),
+                               128)  # for input shape: [1, 3, 480, 640], the output shape is: [1, 32, 24, 24]
+        self.fc1_2 = nn.Linear(128, 64)
+        self.fc1_3 = nn.Linear(64, 32)
+        self.fc1_4 = nn.Linear(32, 4)  # for ee_loc
+        self.fc1_5 = nn.Linear(32, 4)  # for o_loc
+
+    def forward(self, x):  # TODO: no activation function here?
+        x = self.conv1(x)
+        x = self.pool1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.pool2(x)
+        x = self.conv4(x)
+        x = self.conv5(x)
+        x = self.pool3(x)  # (batch size, 32, 24, 24)
+
+        x = x.view(-1, 32 * 24 * 24)  # Flatten layer
+        # state_info = x.clone()
+        x = self.fc1_1(x)
+        x = self.fc1_2(x)
+        x = self.fc1_3(x)
+        x1 = self.fc1_4(x)  # for ee_loc
+        x2 = self.fc1_5(x)  # for o_loc
+        x1 = F.softmax(x1, dim=1)
+        x2 = F.softmax(x2, dim=1)
+        return x1, x2
+
+
+if __name__ == "__main__":
+    state_model = StateDetect()
+    action_model = ActionDetect()
+
+    img = torch.rand((8, 3, 4, 480, 640))  # (batch, time sequence, channel(including depth), height, width)
+    # states = state_model(img[:, 0])
+    action = action_model(img)
