@@ -224,13 +224,13 @@ class ActionDetect(nn.Module):
         self.pooling1 = nn.AvgPool2d((2, 2), (1, 1))
         self.convlstm = ConvLSTM(input_dim=16,
                                  hidden_dim=[20, 5],
-                                 kernel_size=[(2, 2), (2, 2)],
-                                 stride=[(3, 3), (3, 3)],
+                                 kernel_size=[(3, 3), (2, 2)],
+                                 stride=[(2, 2), (3, 3)],
                                  num_layers=2,
                                  batch_first=False,
                                  bias=True,
                                  return_all_layers=False)
-        self.fc = nn.Linear(1170, 4)
+        self.fc = nn.Linear(2470, 4)
 
     def forward(self, inputs, state_tensor=None):
         # TODO check the size of inputs, currently assume (batch_size, sequence_size, C, H, W)
