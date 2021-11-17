@@ -1,6 +1,8 @@
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, utils
 import numpy as np
 
 
@@ -287,6 +289,28 @@ class StateDetect(nn.Module):
         x1 = F.softmax(x1, dim=1)
         x2 = F.softmax(x2, dim=1)
         return x1, x2
+
+
+class ActionDataset(Dataset):
+    def __init__(self, csv_file, root_dir, transform=None):
+        pass
+
+    def __len__(self):
+        pass
+
+    def __getitem__(self, idx):
+        pass
+
+
+class StateDataset(Dataset):
+    def __init__(self, csv_file, root_dir, transform=None):
+        pass
+
+    def __len__(self):
+        pass
+
+    def __getitem__(self, idx):
+        pass
 
 
 if __name__ == "__main__":
