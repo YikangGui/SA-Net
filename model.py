@@ -4,6 +4,24 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 import numpy as np
+import pandas as pd
+import os
+from skimage import io, transform
+import matplotlib.pyplot as plt
+import torch.optim as optim
+
+
+use_cuda = torch.cuda.is_available()
+device = torch.device("cuda:0" if use_cuda else "cpu")
+torch.backends.cudnn.benchmark = True
+
+
+label_dict = {
+    'atHome': 0,
+    'onConveyor': 1,
+    'inFront': 2,
+    'atBin': 3
+}
 
 
 class ConvLSTMCell(nn.Module):
@@ -55,8 +73,6 @@ class ConvLSTMCell(nn.Module):
 
         input_conv = self.conv_input(input_tensor)
         h_conv = self.conv_h(h_cur)
-        print('h', h_conv.shape)
-        print('input', input_conv.shape)
         combined_conv = input_conv + h_conv
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
         i = torch.sigmoid(cc_i)
@@ -74,9 +90,10 @@ class ConvLSTMCell(nn.Module):
         output_height = int((height + 2 * self.padding[0] - self.kernel_size[0]) / self.stride[0] + 1)
         output_width = int((width + 2 * self.padding[1] - self.kernel_size[1]) / self.stride[1] + 1)
 
-        return (torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
-                torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
-                output_height, output_width)
+        return (
+        torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
+        torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
+        output_height, output_width)
 
 
 class ConvLSTM(nn.Module):
@@ -232,7 +249,7 @@ class ActionDetect(nn.Module):
                                  batch_first=False,
                                  bias=True,
                                  return_all_layers=False)
-        self.fc = nn.Linear(2470, 4)
+        self.fc = nn.Linear(2470, 5)
 
     def forward(self, inputs, state_tensor=None):
         # TODO check the size of inputs, currently assume (batch_size, sequence_size, C, H, W)
@@ -246,14 +263,14 @@ class ActionDetect(nn.Module):
         convlstm_h, convlstm_c = convlstm_outputs[0]
         # convlstm_outputs = torch.cat([convlstm_outputs, state_tensor], dim=1)
         convlstm_h = torch.flatten(convlstm_h, start_dim=1)
-        outputs = F.softmax(self.fc(convlstm_h), dim=1)
+        # outputs = F.softmax(self.fc(convlstm_h), dim=1)
         return outputs
 
 
 class StateDetect(nn.Module):
     def __init__(self):
         super(StateDetect, self).__init__()
-        self.conv1 = nn.Conv2d(4, 32, kernel_size=(3, 9), stride=1)
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=(3, 9), stride=1)
         self.pool1 = nn.MaxPool2d(4, 3)
         self.conv2 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
         self.conv3 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
@@ -269,25 +286,25 @@ class StateDetect(nn.Module):
         self.fc1_4 = nn.Linear(32, 4)  # for ee_loc
         self.fc1_5 = nn.Linear(32, 4)  # for o_loc
 
-    def forward(self, x):  # TODO: no activation function here?
-        x = self.conv1(x)
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
         x = self.pool1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
         x = self.pool2(x)
-        x = self.conv4(x)
-        x = self.conv5(x)
+        x = F.relu(self.conv4(x))
+        x = F.relu(self.conv5(x))
         x = self.pool3(x)  # (batch size, 32, 24, 24)
 
         x = x.view(-1, 32 * 24 * 24)  # Flatten layer
         # state_info = x.clone()
-        x = self.fc1_1(x)
-        x = self.fc1_2(x)
-        x = self.fc1_3(x)
-        x1 = self.fc1_4(x)  # for ee_loc
-        x2 = self.fc1_5(x)  # for o_loc
-        x1 = F.softmax(x1, dim=1)
-        x2 = F.softmax(x2, dim=1)
+        x = F.relu(self.fc1_1(x))
+        x = F.relu(self.fc1_2(x))
+        x = F.relu(self.fc1_3(x))
+        x1 = F.relu(self.fc1_4(x))  # for ee_loc
+        x2 = F.relu(self.fc1_5(x))  # for o_loc
+        # x1 = F.softmax(x1, dim=1)
+        # x2 = F.softmax(x2, dim=1)
         return x1, x2
 
 
@@ -304,19 +321,120 @@ class ActionDataset(Dataset):
 
 class StateDataset(Dataset):
     def __init__(self, csv_file, root_dir, transform=None):
-        pass
+        self.labels = pd.read_csv(csv_file)
+        self.root_dir = root_dir
+        self.transform = transform
 
     def __len__(self):
-        pass
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        pass
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        name, o_loc, e_loc = self.labels.iloc[idx]
+        img_name = os.path.join(self.root_dir, name)
+        image = io.imread(img_name)
+        sample = {'image': image / 255, 'onion': np.array(label_dict[o_loc]), 'eef': np.array(label_dict[e_loc])}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+class Rescale(object):
+    """Rescale the image in a sample to a given size.
+
+    Args:
+        output_size (tuple or int): Desired output size. If tuple, output is
+            matched to output_size. If int, smaller of image edges is matched
+            to output_size keeping aspect ratio the same.
+    """
+
+    def __init__(self, output_size=(480, 640)):
+        assert isinstance(output_size, (int, tuple))
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image = sample['image']
+
+        h, w = image.shape[:2]
+        if isinstance(self.output_size, int):
+            if h > w:
+                new_h, new_w = self.output_size * h / w, self.output_size
+            else:
+                new_h, new_w = self.output_size, self.output_size * w / h
+        else:
+            new_h, new_w = self.output_size
+
+        new_h, new_w = int(new_h), int(new_w)
+
+        img = transform.resize(image, (new_h, new_w))
+
+        return {'image': img, 'onion': sample['onion'], 'eef': sample['eef']}
+
+
+class ToTensor(object):
+    """Convert ndarrays in sample to Tensors."""
+
+    def __call__(self, sample):
+        image, onion, eef = sample['image'], sample['onion'], sample['eef']
+
+        # swap color axis because
+        # numpy image: H x W x C
+        # torch image: C x H x W
+        image = image.transpose((2, 0, 1))
+        return {'image': torch.from_numpy(image),
+                'onion': torch.from_numpy(onion),
+                'eef': torch.from_numpy(eef)}
 
 
 if __name__ == "__main__":
-    state_model = StateDetect()
-    action_model = ActionDetect()
+    state_model = StateDetect().to(device)
+    action_model = ActionDetect().to(device)
 
-    img = torch.rand((8, 3, 4, 480, 640))  # (batch, time sequence, channel(including depth), height, width)
+    # img = torch.rand((8, 3, 4, 480, 640))  # (batch, time sequence, channel(including depth), height, width)
     # states = state_model(img[:, 0])
-    action = action_model(img)
+    # action = action_model(img)
+
+    transformed_dataset = StateDataset(csv_file='data/RealSense/state/label.csv',
+                                       root_dir='data/RealSense/state/rgb',
+                                       transform=transforms.Compose([
+                                           Rescale(),
+                                           ToTensor()]))
+
+    dataloader = DataLoader(transformed_dataset, batch_size=32,
+                            shuffle=True, num_workers=8)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(state_model.parameters())
+
+    for epoch in range(10):  # loop over the dataset multiple times
+
+        running_loss = 0.0
+        for i, data in enumerate(dataloader, 0):
+            # get the inputs; data is a list of [inputs, labels]
+            inputs = data['image'].float().to(device)
+            onion = data['onion'].to(device)
+            eef = data['eef'].to(device)
+
+            # zero the parameter gradients
+            optimizer.zero_grad()
+
+            # forward + backward + optimize
+            outputs_onion, outputs_eef = state_model(inputs)
+            loss_onion = criterion(outputs_onion, onion)
+            loss_eef = criterion(outputs_eef, eef)
+            loss = loss_onion + loss_eef
+            loss.backward()
+            optimizer.step()
+
+            # print statistics
+            running_loss += loss.item()
+            if i % 10 == 9:  # print every 2000 mini-batches
+                print('[%d, %5d] loss: %.3f' %
+                      (epoch + 1, i + 1, running_loss / 10))
+                running_loss = 0.0
+
+    print('Finished Training')
