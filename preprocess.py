@@ -20,14 +20,17 @@ def state_image_preprocess():
     label_df = pd.DataFrame(columns=['image', 'onion', 'eef'])
     for index in range(1, 13):
         bag_pwd = f'{PWD}/BagFolder{index}'
-        bag_csv = f'{bag_pwd}/label_new.csv'
+        bag_csv = f'{bag_pwd}/label.csv'
         df = pd.read_csv(bag_csv, header=None, names=['image', 'onion', 'eef'])
 
         start_index = df['image'][0].find('f')
         for name in df['image']:
             try:
-                os.rename(f'{bag_pwd}/rgb_images1/{name}', f'{bag_pwd}/rgb_images1/{name[start_index:]}')
-                os.rename(f'{bag_pwd}/rgb_images1/{name[start_index:]}', f'{bag_pwd}/rgb_images1/{index}_{name[start_index:]}')
+                # os.rename(f'{bag_pwd}/rgb_images1/{name}', f'{bag_pwd}/rgb_images1/{name[start_index:]}')
+                # os.rename(f'{bag_pwd}/rgb_images1/{name[start_index:]}', f'{bag_pwd}/rgb_images1/{index}_{name[start_index:]}')
+
+                # os.rename(f'{bag_pwd}/depth_images1/{name}', f'{bag_pwd}/depth_images1/{name[start_index:]}')
+                os.rename(f'{bag_pwd}/depth_images1/d{name[start_index:]}', f'{bag_pwd}/depth_images1/{index}_d{name[start_index:]}')
             except FileNotFoundError:
                 pass
 

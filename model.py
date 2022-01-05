@@ -23,6 +23,14 @@ label_dict = {
     'atBin': 3
 }
 
+action_dict = {
+    'Claim': 0,
+    'Pick': 1,
+    'Inspect': 2,
+    'PlaceOnConveyor': 3,
+    'PlaceOnBin': 4
+}
+
 
 class ConvLSTMCell(nn.Module):
 
@@ -237,7 +245,7 @@ class ActionDetect(nn.Module):
         super(ActionDetect, self).__init__()
         self.sequence_size = sequence_size
         # TODO added depth image as 4th channel
-        self.conv1 = nn.Conv2d(4, 32, kernel_size=(3, 3), stride=(2, 2))
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=(3, 3), stride=(2, 2))
         # TODO regularization for kernel, torch.norm(model.layer.weight, p=2)
         self.conv2 = nn.Conv2d(32, 16, kernel_size=(2, 2), stride=(2, 2))
         self.pooling1 = nn.AvgPool2d((2, 2), (1, 1))
@@ -264,7 +272,7 @@ class ActionDetect(nn.Module):
         # convlstm_outputs = torch.cat([convlstm_outputs, state_tensor], dim=1)
         convlstm_h = torch.flatten(convlstm_h, start_dim=1)
         # outputs = F.softmax(self.fc(convlstm_h), dim=1)
-        return outputs
+        return convlstm_h
 
 
 class StateDetect(nn.Module):
@@ -309,21 +317,65 @@ class StateDetect(nn.Module):
 
 
 class ActionDataset(Dataset):
-    def __init__(self, csv_file, root_dir, transform=None):
-        pass
+    def __init__(self, action_csv_file='data/RealSense/state/action_label.csv', rgb_dir='data/RealSense/state/rgb',
+                 depth_dir='data/RealSense/state/depth', transform=None, image_pool=None):
+        self.action_csv_file = action_csv_file
+        self.rgb_dir = rgb_dir
+        self.depth_dir = depth_dir
+        self.transform = transform
+        self.image_pool = image_pool
+        try:
+            self.action_labels = pd.read_csv(action_csv_file)
+        except FileNotFoundError:
+            self.action_labels = self.create_action_csv()
 
     def __len__(self):
-        pass
+        return len(self.action_labels)
 
     def __getitem__(self, idx):
-        pass
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        data = self.action_labels.iloc[idx]
+        images = data[:-1]
+        action = data[-1]
+
+        data = []
+        for rgb_img in images:
+            if self.image_pool:
+                rgb = self.image_pool[rgb_img]
+            else:
+                rgb_img_name = os.path.join(self.rgb_dir, rgb_img)
+                rgb = io.imread(rgb_img_name)
+
+            data.append(rgb.copy())
+        data = np.array(data)
+
+        sample = {'image': data / 255, 'action': np.array(action_dict[action]), 'name': rgb_img}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+    def create_action_csv(self):
+        index = 0
+        action_labels = pd.DataFrame(columns=['image-5', 'image-4', 'image-3', 'image-2', 'image-1', 'action'])
+        for i in range(len(self.labels)):
+            if pd.isna(self.labels.iloc[i]['action']):
+                continue
+            action_labels.loc[index] = [self.labels.iloc[j]['image'] for j in range(i-4, i+1)] + [self.labels.iloc[i]['action']]
+            index += 1
+        action_labels.to_csv(self.action_csv_file, index=False)
+        return action_labels
 
 
 class StateDataset(Dataset):
-    def __init__(self, csv_file, root_dir, transform=None):
+    def __init__(self, csv_file, rgb_dir, transform=None, image_pool=None):
         self.labels = pd.read_csv(csv_file)
-        self.root_dir = root_dir
+        self.rgb_dir = rgb_dir
         self.transform = transform
+        self.image_pool = image_pool
 
     def __len__(self):
         return len(self.labels)
@@ -333,9 +385,9 @@ class StateDataset(Dataset):
             idx = idx.tolist()
 
         name, o_loc, e_loc = self.labels.iloc[idx]
-        img_name = os.path.join(self.root_dir, name)
+        img_name = os.path.join(self.rgb_dir, name)
         image = io.imread(img_name)
-        sample = {'image': image / 255, 'onion': np.array(label_dict[o_loc]), 'eef': np.array(label_dict[e_loc])}
+        sample = {'image': image / 255, 'onion': np.array(label_dict[o_loc]), 'eef': np.array(label_dict[e_loc]), 'name': name}
 
         if self.transform:
             sample = self.transform(sample)
@@ -372,14 +424,46 @@ class Rescale(object):
 
         img = transform.resize(image, (new_h, new_w))
 
-        return {'image': img, 'onion': sample['onion'], 'eef': sample['eef']}
+        return {'image': img, 'onion': sample['onion'], 'eef': sample['eef'], 'name': sample['name']}
+
+
+class RescaleAction(object):
+    """Rescale the image in a sample to a given size.
+
+    Args:
+        output_size (tuple or int): Desired output size. If tuple, output is
+            matched to output_size. If int, smaller of image edges is matched
+            to output_size keeping aspect ratio the same.
+    """
+
+    def __init__(self, output_size=(480, 640)):
+        assert isinstance(output_size, (int, tuple))
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image = sample['image']
+
+        h, w = image.shape[1:3]
+        if isinstance(self.output_size, int):
+            if h > w:
+                new_h, new_w = self.output_size * h / w, self.output_size
+            else:
+                new_h, new_w = self.output_size, self.output_size * w / h
+        else:
+            new_h, new_w = self.output_size
+
+        new_h, new_w = int(new_h), int(new_w)
+
+        img = np.array([transform.resize(i, (new_h, new_w)) for i in image])
+
+        return {'image': img, 'action': sample['action'], 'name': sample['name']}
 
 
 class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
 
     def __call__(self, sample):
-        image, onion, eef = sample['image'], sample['onion'], sample['eef']
+        image, onion, eef, name = sample['image'], sample['onion'], sample['eef'], sample['name']
 
         # swap color axis because
         # numpy image: H x W x C
@@ -387,54 +471,88 @@ class ToTensor(object):
         image = image.transpose((2, 0, 1))
         return {'image': torch.from_numpy(image),
                 'onion': torch.from_numpy(onion),
-                'eef': torch.from_numpy(eef)}
+                'eef': torch.from_numpy(eef),
+                'name': name}
+
+
+class ToTensorAction(object):
+    """Convert ndarrays in sample to Tensors."""
+
+    def __call__(self, sample):
+        image, action, name = sample['image'], sample['action'], sample['name']
+
+        # swap color axis because
+        # numpy image: L x H x W x C
+        # torch image: L x C x H x W
+        image = image.transpose((0, 3, 1, 2))
+        return {'image': torch.from_numpy(image),
+                'action': torch.from_numpy(action),
+                'name': name}
 
 
 if __name__ == "__main__":
-    state_model = StateDetect().to(device)
+    # state_model = StateDetect().to(device)
+    #
+    # # img = torch.rand((8, 3, 4, 480, 640))  # (batch, time sequence, channel(including depth), height, width)
+    # # states = state_model(img[:, 0])
+    # # action = action_model(img)
+    #
+    # transformed_dataset = StateDataset(csv_file='data/RealSense/state/label.csv',
+    #                                    root_dir='data/RealSense/state/rgb',
+    #                                    transform=transforms.Compose([
+    #                                        Rescale(),
+    #                                        ToTensor()]))
+    #
+    # dataloader = DataLoader(transformed_dataset, batch_size=32,
+    #                         shuffle=True, num_workers=8)
+
     action_model = ActionDetect().to(device)
 
-    # img = torch.rand((8, 3, 4, 480, 640))  # (batch, time sequence, channel(including depth), height, width)
-    # states = state_model(img[:, 0])
-    # action = action_model(img)
-
-    transformed_dataset = StateDataset(csv_file='data/RealSense/state/label.csv',
-                                       root_dir='data/RealSense/state/rgb',
-                                       transform=transforms.Compose([
-                                           Rescale(),
-                                           ToTensor()]))
+    transformed_dataset = ActionDataset(
+        transform=transforms.Compose([
+            RescaleAction(),
+            ToTensorAction()
+        ]))
 
     dataloader = DataLoader(transformed_dataset, batch_size=32,
-                            shuffle=True, num_workers=8)
+                            shuffle=True, num_workers=4)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(state_model.parameters())
+    optimizer = optim.Adam(action_model.parameters())
 
+    print('Start Training...')
     for epoch in range(10):  # loop over the dataset multiple times
+        # train_loss_onion = []
+        # train_loss_eef = []
+        # train_pred_onion = []
+        # train_label_onion = []
+        # train_pred_eef = []
+        # train_label_eef = []
 
-        running_loss = 0.0
+        action_model.train()
         for i, data in enumerate(dataloader, 0):
             # get the inputs; data is a list of [inputs, labels]
             inputs = data['image'].float().to(device)
-            onion = data['onion'].to(device)
-            eef = data['eef'].to(device)
+            action = data['action'].to(device)
+            # name = data['name']
 
             # zero the parameter gradients
             optimizer.zero_grad()
 
             # forward + backward + optimize
-            outputs_onion, outputs_eef = state_model(inputs)
-            loss_onion = criterion(outputs_onion, onion)
-            loss_eef = criterion(outputs_eef, eef)
-            loss = loss_onion + loss_eef
+            outputs= action_model(inputs)
+            loss = criterion(outputs, action)
             loss.backward()
             optimizer.step()
 
-            # print statistics
-            running_loss += loss.item()
-            if i % 10 == 9:  # print every 2000 mini-batches
-                print('[%d, %5d] loss: %.3f' %
-                      (epoch + 1, i + 1, running_loss / 10))
-                running_loss = 0.0
+            print(epoch, i, loss.item())
 
-    print('Finished Training')
+            # print statistics
+            # train_loss_onion.append(loss_onion.item())
+            # train_loss_eef.append(loss_eef.item())
+            # train_pred_onion.extend(torch.argmax(outputs_onion, axis=1).cpu().numpy().tolist())
+            # train_pred_eef.extend(torch.argmax(outputs_eef, axis=1).cpu().numpy().tolist())
+            # train_label_onion.extend(onion.cpu().numpy().tolist())
+            # train_label_eef.extend(eef.cpu().numpy().tolist())
+
+
