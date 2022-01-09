@@ -6,7 +6,7 @@ from os import listdir
 from os.path import isfile, join
 import pandas as pd
 
-PWD = './data/RealSense'
+PWD = './data/Bag_to_Depth/src/bag2rgbdepth/scripts/Data'
 label_dict = {
     'c': 'onConveyor',
     'h': 'atHome',
@@ -43,15 +43,18 @@ def state_image_preprocess():
 
 
 def state_label():
-    for i in range(1, 13):
-        csv_pwd = f'{PWD}/BagFolder{i}/label.csv'
-        rgb_pwd = f'{PWD}/BagFolder{i}/rgb_images1'
+    for i in range(7, 11):
+        csv_pwd = f'{PWD}/rgb_images{i}/{i+12}_label.csv'
+        rgb_pwd = f'{PWD}/rgb_images{i}'
         onlyfiles = [f for f in listdir(rgb_pwd) if isfile(join(rgb_pwd, f))]
-        for image in range(len(onlyfiles)):
-            img = mpimg.imread(f'{rgb_pwd}/frame{image}.jpg')
+        onlyfiles.sort()
+        for image in onlyfiles:
 
+            start_index = image.find('f')
+
+            os.rename(f'{rgb_pwd}/{image}', f'{rgb_pwd}/{i+12}_{image[start_index:]}')
             with open(csv_pwd, 'a') as f:
-                label = f'frame{image}.jpg,,\n'
+                label = f'{i+12}_{image[start_index:]},,\n'
                 f.write(label)
 
 
@@ -77,4 +80,5 @@ def state_label():
 
 
 if __name__ == '__main__':
-    state_image_preprocess()
+    # state_image_preprocess()
+    state_label()

@@ -271,8 +271,9 @@ class ActionDetect(nn.Module):
         convlstm_h, convlstm_c = convlstm_outputs[0]
         # convlstm_outputs = torch.cat([convlstm_outputs, state_tensor], dim=1)
         convlstm_h = torch.flatten(convlstm_h, start_dim=1)
+        outputs = self.fc(convlstm_h)
         # outputs = F.softmax(self.fc(convlstm_h), dim=1)
-        return convlstm_h
+        return outputs
 
 
 class StateDetect(nn.Module):

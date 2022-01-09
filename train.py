@@ -13,13 +13,12 @@ from tqdm import tqdm
 from model import *
 import random
 import time
-
+from datetime import datetime
 
 BATCH_SIZE_STATE = 16
 BATCH_SIZE_ACTION = 32
 EPOCH = 100
-PRELOAD_IMAGE = True
-
+PRELOAD_IMAGE = False
 
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda:0" if use_cuda else "cpu")
@@ -27,18 +26,17 @@ torch.backends.cudnn.benchmark = True
 torch.manual_seed(0)
 random.seed(0)
 np.random.seed(0)
-torch.use_deterministic_algorithms(True)
+# torch.use_deterministic_algorithms(True)
 
 
 def seed_worker(worker_id):
-    worker_seed = torch.initial_seed() % 2**32
+    worker_seed = torch.initial_seed() % 2 ** 32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 
 g = torch.Generator()
 g.manual_seed(0)
-
 
 label_dict = {
     'atHome': 0,
@@ -62,21 +60,25 @@ def load_image(dir):
 
 
 class TrainState(object):
-    def __init__(self, validation_ratio=0.1, rgb_pwd='data/RealSense/state/rgb', csv_pwd='data/RealSense/state/label.csv'):
+    def __init__(self, validation_ratio=0.1, rgb_pwd='data/RealSense/train/rgb',
+                 csv_pwd='data/RealSense/train/label.csv'):
         self.validation_ratio = validation_ratio
-        self.rgb_pwd = rgb_pwd
-        self.csv_pwd = csv_pwd
 
-        train = StateDataset(csv_file='data/RealSense/state/label.csv',
-                     root_dir='data/RealSense/state/rgb',
-                     transform=transforms.Compose([
-                         Rescale(),
-                         ToTensor()]))
-        train_subset, val_subset = torch.utils.data.random_split(
-            train, [5000, 684], generator=torch.Generator().manual_seed(1))
-        self.train_loader = DataLoader(dataset=train_subset, shuffle=True, batch_size=BATCH_SIZE_STATE, num_workers=4,
+        train = StateDataset(csv_file='data/RealSense/train/train_label.csv',
+                             rgb_dir='data/RealSense/train/rgb',
+                             transform=transforms.Compose([
+                                 Rescale(),
+                                 ToTensor()]))
+        val = StateDataset(csv_file='data/RealSense/val/val_label.csv',
+                           rgb_dir='data/RealSense/val/rgb',
+                           transform=transforms.Compose([
+                               Rescale(),
+                               ToTensor()]))
+        # train_subset, val_subset = torch.utils.data.random_split(
+        #     train, [5000, 684], generator=torch.Generator().manual_seed(1))
+        self.train_loader = DataLoader(dataset=train, shuffle=True, batch_size=BATCH_SIZE_STATE, num_workers=4,
                                        pin_memory=True, worker_init_fn=seed_worker, generator=g)
-        self.val_loader = DataLoader(dataset=val_subset, shuffle=False, batch_size=BATCH_SIZE_STATE, num_workers=4,
+        self.val_loader = DataLoader(dataset=val, shuffle=False, batch_size=BATCH_SIZE_STATE, num_workers=4,
                                      pin_memory=True, worker_init_fn=seed_worker, generator=g)
         self.model = StateDetect().to(device)
         self.criterion = nn.CrossEntropyLoss()
@@ -105,12 +107,14 @@ class TrainState(object):
                 self.optimizer.zero_grad()
 
                 # forward + backward + optimize
+                time2 = time.time()
                 outputs_onion, outputs_eef = self.model(inputs)
                 loss_onion = self.criterion(outputs_onion, onion)
                 loss_eef = self.criterion(outputs_eef, eef)
                 loss = loss_onion + loss_eef
                 loss.backward()
                 self.optimizer.step()
+                time3 = time.time()
 
                 # print statistics
                 train_loss_onion.append(loss_onion.item())
@@ -162,17 +166,22 @@ class TrainState(object):
                   f'train onion loss: {round(np.mean(train_loss_onion), 3)} | '
                   f'train eef loss: {round(np.mean(train_loss_eef), 3)} | '
                   f'val onion acc: {round(get_stats(val_pred_onion, val_label_onion) * 100, 2)}% | '
-                  f'val eef acc: {round(get_stats(val_pred_eef, val_label_eef) * 100, 2)}% | '                  
+                  f'val eef acc: {round(get_stats(val_pred_eef, val_label_eef) * 100, 2)}% | '
                   f'val onion loss: {round(np.mean(val_loss_onion), 3)} | '
                   f'val eef loss: {round(np.mean(val_loss_eef), 3)} | '
-                  f'collapsed time: {round(time.time() - start_time, 1)}s')
+                  f'collapsed time: {round(time.time() - start_time, 1)}s | '
+                  f'current time: {datetime.now().strftime("%H:%M:%S")}')
             torch.save(self.model.state_dict(), f'model/state/{epoch}.pth')
             val_result.to_csv(f'model/state/{epoch}.csv', index=False)
         print('Finished Training')
 
+    def test(self, weights):
+        self.model.load_state_dict(torch.load(weights))
+
 
 class TrainAction(object):
-    def __init__(self, validation_ratio=0.1, rgb_pwd='data/RealSense/state/rgb', csv_pwd='data/RealSense/state/label.csv'):
+    def __init__(self, validation_ratio=0.1, rgb_pwd='data/RealSense/state/rgb',
+                 csv_pwd='data/RealSense/state/label.csv'):
         self.validation_ratio = validation_ratio
         self.rgb_pwd = rgb_pwd
         self.csv_pwd = csv_pwd
@@ -181,23 +190,23 @@ class TrainAction(object):
             self.image_pool = load_image(self.rgb_pwd)
 
         train = ActionDataset(
-                     transform=transforms.Compose([
-                         RescaleAction(),
-                         ToTensorAction()]),
-                     image_pool=self.image_pool
+            transform=transforms.Compose([
+                RescaleAction(),
+                ToTensorAction()]),
+            image_pool=self.image_pool
         )
         train_subset, val_subset = torch.utils.data.random_split(
             train, [5000, 640], generator=torch.Generator().manual_seed(1))
-        self.train_loader = DataLoader(dataset=train_subset, shuffle=True, batch_size=BATCH_SIZE_ACTION, num_workers=8,
+        self.train_loader = DataLoader(dataset=train_subset, shuffle=True, batch_size=BATCH_SIZE_ACTION, num_workers=4,
                                        pin_memory=True, worker_init_fn=seed_worker, generator=g)
-        self.val_loader = DataLoader(dataset=val_subset, shuffle=False, batch_size=BATCH_SIZE_ACTION, num_workers=8,
+        self.val_loader = DataLoader(dataset=val_subset, shuffle=False, batch_size=BATCH_SIZE_ACTION, num_workers=4,
                                      pin_memory=True, worker_init_fn=seed_worker, generator=g)
         self.model = ActionDetect().to(device)
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters())
 
     def main(self):
-        print('Start Training...')
+        print('Start Action Recognition Training...')
         for epoch in range(EPOCH):  # loop over the dataset multiple times
             train_loss = []
             train_pred = []
@@ -206,10 +215,12 @@ class TrainAction(object):
 
             self.model.train()
             for i, data in tqdm(enumerate(self.train_loader, 0)):
+                time1 = time.time()
                 # get the inputs; data is a list of [inputs, labels]
                 inputs = data['image'].float().to(device)
                 action = data['action'].to(device)
                 # name = data['name']
+                time2 = time.time()
 
                 # zero the parameter gradients
                 self.optimizer.zero_grad()
@@ -219,6 +230,7 @@ class TrainAction(object):
                 loss = self.criterion(outputs, action)
                 loss.backward()
                 self.optimizer.step()
+                time3 = time.time()
 
                 train_loss.append(loss.item())
                 train_pred.extend(torch.argmax(outputs, axis=1).cpu().numpy().tolist())
@@ -263,8 +275,8 @@ class TrainAction(object):
 
 
 if __name__ == '__main__':
-    # state = TrainState()
-    # state.main()
+    state = TrainState()
+    state.main()
 
-    action = TrainAction()
-    action.main()
+    # action = TrainAction()
+    # action.main()
