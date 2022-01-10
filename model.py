@@ -10,11 +10,9 @@ from skimage import io, transform
 import matplotlib.pyplot as plt
 import torch.optim as optim
 
-
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda:0" if use_cuda else "cpu")
 torch.backends.cudnn.benchmark = True
-
 
 label_dict = {
     'atHome': 0,
@@ -99,9 +97,9 @@ class ConvLSTMCell(nn.Module):
         output_width = int((width + 2 * self.padding[1] - self.kernel_size[1]) / self.stride[1] + 1)
 
         return (
-        torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
-        torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
-        output_height, output_width)
+            torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
+            torch.zeros(batch_size, self.hidden_dim, output_height, output_width, device=self.conv_input.weight.device),
+            output_height, output_width)
 
 
 class ConvLSTM(nn.Module):
@@ -288,30 +286,49 @@ class StateDetect(nn.Module):
         self.conv5 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
         self.pool3 = nn.MaxPool2d(2, 2)
 
-        self.fc1_1 = nn.Linear((32 * 24 * 24),
+        # self.fc1_1 = nn.Linear((32 * 24 * 24),
+        #                        128)  # for input shape: [1, 3, 480, 640], the output shape is: [1, 32, 24, 24]
+        self.fc1_1 = nn.Linear((32 * 37 * 60),
                                128)  # for input shape: [1, 3, 480, 640], the output shape is: [1, 32, 24, 24]
         self.fc1_2 = nn.Linear(128, 64)
         self.fc1_3 = nn.Linear(64, 32)
         self.fc1_4 = nn.Linear(32, 4)  # for ee_loc
         self.fc1_5 = nn.Linear(32, 4)  # for o_loc
 
+        self.dropout = nn.Dropout(p=0.75)
+
+        self.init_weight()
+
+    def init_weight(self):
+        nn.init.kaiming_normal_(self.conv1.weight)
+        nn.init.kaiming_normal_(self.conv2.weight)
+        nn.init.kaiming_normal_(self.conv3.weight)
+        nn.init.kaiming_normal_(self.conv4.weight)
+        nn.init.kaiming_normal_(self.conv5.weight)
+        nn.init.kaiming_normal_(self.fc1_1.weight)
+        nn.init.kaiming_normal_(self.fc1_2.weight)
+        nn.init.kaiming_normal_(self.fc1_3.weight)
+        nn.init.kaiming_normal_(self.fc1_4.weight)
+        nn.init.kaiming_normal_(self.fc1_5.weight)
+
     def forward(self, x):
-        x = F.relu(self.conv1(x))
+        x = F.leaky_relu(self.conv1(x))
         x = self.pool1(x)
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
+        x = F.leaky_relu(self.conv2(x))
+        x = F.leaky_relu(self.conv3(x))
         x = self.pool2(x)
-        x = F.relu(self.conv4(x))
-        x = F.relu(self.conv5(x))
+        x = F.leaky_relu(self.conv4(x))
+        x = F.leaky_relu(self.conv5(x))
         x = self.pool3(x)  # (batch size, 32, 24, 24)
 
-        x = x.view(-1, 32 * 24 * 24)  # Flatten layer
+        # x = x.view(-1, 32 * 24 * 24)  # Flatten layer
+        x = x.view(-1, 32 * 37 * 60)  # Flatten layer
         # state_info = x.clone()
-        x = F.relu(self.fc1_1(x))
-        x = F.relu(self.fc1_2(x))
-        x = F.relu(self.fc1_3(x))
-        x1 = F.relu(self.fc1_4(x))  # for ee_loc
-        x2 = F.relu(self.fc1_5(x))  # for o_loc
+        x = self.dropout(F.leaky_relu(self.fc1_1(x)))
+        x = self.dropout(F.leaky_relu(self.fc1_2(x)))
+        x = self.dropout(F.leaky_relu(self.fc1_3(x)))
+        x1 = self.fc1_4(x)  # for ee_loc
+        x2 = self.fc1_5(x)  # for o_loc
         # x1 = F.softmax(x1, dim=1)
         # x2 = F.softmax(x2, dim=1)
         return x1, x2
@@ -326,7 +343,7 @@ class ActionDataset(Dataset):
         self.transform = transform
         self.image_pool = image_pool
         try:
-            self.action_labels = pd.read_csv(action_csv_file)
+            self.action_labels = pd.read_csv(action_csv_file, header=None)
         except FileNotFoundError:
             self.action_labels = self.create_action_csv()
 
@@ -365,7 +382,8 @@ class ActionDataset(Dataset):
         for i in range(len(self.labels)):
             if pd.isna(self.labels.iloc[i]['action']):
                 continue
-            action_labels.loc[index] = [self.labels.iloc[j]['image'] for j in range(i-4, i+1)] + [self.labels.iloc[i]['action']]
+            action_labels.loc[index] = [self.labels.iloc[j]['image'] for j in range(i - 4, i + 1)] + [
+                self.labels.iloc[i]['action']]
             index += 1
         action_labels.to_csv(self.action_csv_file, index=False)
         return action_labels
@@ -373,7 +391,7 @@ class ActionDataset(Dataset):
 
 class StateDataset(Dataset):
     def __init__(self, csv_file, rgb_dir, transform=None, image_pool=None):
-        self.labels = pd.read_csv(csv_file)
+        self.labels = pd.read_csv(csv_file, header=None)
         self.rgb_dir = rgb_dir
         self.transform = transform
         self.image_pool = image_pool
@@ -388,7 +406,8 @@ class StateDataset(Dataset):
         name, o_loc, e_loc = self.labels.iloc[idx]
         img_name = os.path.join(self.rgb_dir, name)
         image = io.imread(img_name)
-        sample = {'image': image / 255, 'onion': np.array(label_dict[o_loc]), 'eef': np.array(label_dict[e_loc]), 'name': name}
+        sample = {'image': image / 255 - 0.474, 'onion': np.array(label_dict[o_loc]),
+                  'eef': np.array(label_dict[e_loc]), 'name': name}
 
         if self.transform:
             sample = self.transform(sample)
@@ -541,7 +560,7 @@ if __name__ == "__main__":
             optimizer.zero_grad()
 
             # forward + backward + optimize
-            outputs= action_model(inputs)
+            outputs = action_model(inputs)
             loss = criterion(outputs, action)
             loss.backward()
             optimizer.step()

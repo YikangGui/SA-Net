@@ -18,6 +18,7 @@ from datetime import datetime
 BATCH_SIZE_STATE = 16
 BATCH_SIZE_ACTION = 32
 EPOCH = 100
+EPOCH_START = 0
 PRELOAD_IMAGE = False
 
 use_cuda = torch.cuda.is_available()
@@ -67,26 +68,33 @@ class TrainState(object):
         train = StateDataset(csv_file='data/RealSense/train/train_label.csv',
                              rgb_dir='data/RealSense/train/rgb',
                              transform=transforms.Compose([
-                                 Rescale(),
+                                 # Rescale(),
                                  ToTensor()]))
         val = StateDataset(csv_file='data/RealSense/val/val_label.csv',
                            rgb_dir='data/RealSense/val/rgb',
                            transform=transforms.Compose([
-                               Rescale(),
+                               # Rescale(),
                                ToTensor()]))
         # train_subset, val_subset = torch.utils.data.random_split(
         #     train, [5000, 684], generator=torch.Generator().manual_seed(1))
-        self.train_loader = DataLoader(dataset=train, shuffle=True, batch_size=BATCH_SIZE_STATE, num_workers=4,
+        self.train_loader = DataLoader(dataset=train, shuffle=True, batch_size=BATCH_SIZE_STATE, num_workers=8,
                                        pin_memory=True, worker_init_fn=seed_worker, generator=g)
-        self.val_loader = DataLoader(dataset=val, shuffle=False, batch_size=BATCH_SIZE_STATE, num_workers=4,
+        self.val_loader = DataLoader(dataset=val, shuffle=False, batch_size=BATCH_SIZE_STATE, num_workers=8,
                                      pin_memory=True, worker_init_fn=seed_worker, generator=g)
         self.model = StateDetect().to(device)
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(self.model.parameters())
+        self.optimizer = optim.Adam(self.model.parameters(), lr=3e-4, weight_decay=1e-4)
 
-    def main(self):
+    def main(self, weights=None):
         print('Start Training...')
-        for epoch in range(EPOCH):  # loop over the dataset multiple times
+        if weights:
+            print('loading weights...')
+            self.model.load_state_dict(torch.load(f'./model/state/{weights}.pth'))
+            print('loaded weights...')
+            EPOCH = weights + 100
+            EPOCH_START = weights + 1
+
+        for epoch in range(EPOCH_START, EPOCH):  # loop over the dataset multiple times
             train_loss_onion = []
             train_loss_eef = []
             train_pred_onion = []
@@ -103,15 +111,18 @@ class TrainState(object):
                 eef = data['eef'].to(device)
                 # name = data['name']
 
+                # forward + backward + optimize
+                time2 = time.time()
+                with torch.cuda.amp.autocast():
+                    outputs_onion, outputs_eef = self.model(inputs)
+
                 # zero the parameter gradients
                 self.optimizer.zero_grad()
 
-                # forward + backward + optimize
-                time2 = time.time()
-                outputs_onion, outputs_eef = self.model(inputs)
                 loss_onion = self.criterion(outputs_onion, onion)
                 loss_eef = self.criterion(outputs_eef, eef)
                 loss = loss_onion + loss_eef
+                # print(loss)
                 loss.backward()
                 self.optimizer.step()
                 time3 = time.time()
@@ -141,7 +152,8 @@ class TrainState(object):
                     eef = data['eef'].to(device)
                     name = data['name']
 
-                    outputs_onion, outputs_eef = self.model(inputs)
+                    with torch.cuda.amp.autocast():
+                        outputs_onion, outputs_eef = self.model(inputs)
                     loss_onion = self.criterion(outputs_onion, onion)
                     loss_eef = self.criterion(outputs_eef, eef)
 
@@ -158,7 +170,7 @@ class TrainState(object):
                                                torch.argmax(outputs_eef, axis=1).cpu().numpy(),
                                                eef.cpu().numpy())),
                                       columns=['name', 'pred_onion', 'real_onion', 'pred_eef', 'real_eef'])
-                    val_result = pd.concat([val_result, df], sort=False)
+                    val_result = pd.concat([val_result, df])
 
             print(f'epoch: {epoch} | '
                   f'train onion acc: {round(get_stats(train_pred_onion, train_label_onion) * 100, 2)}% | '
@@ -175,8 +187,62 @@ class TrainState(object):
             val_result.to_csv(f'model/state/{epoch}.csv', index=False)
         print('Finished Training')
 
-    def test(self, weights):
-        self.model.load_state_dict(torch.load(weights))
+    def test(self, weights, pwd):
+        print('loading weights...')
+        self.model.load_state_dict(torch.load(f'{pwd}/{weights}.pth'))
+        self.model.eval()
+        print('loaded weights...')
+
+        val_result = pd.DataFrame(columns=['name', 'pred_onion', 'real_onion', 'pred_eef', 'real_eef'])
+
+        val_loss_onion = []
+        val_loss_eef = []
+        val_pred_onion = []
+        val_label_onion = []
+        val_pred_eef = []
+        val_label_eef = []
+        val_onion_dist = []
+        val_eef_dist = []
+
+        with torch.no_grad():
+            start_time = time.time()
+            for i, data in enumerate(self.val_loader, 0):
+                inputs = data['image'].float().to(device)
+                onion = data['onion'].to(device)
+                eef = data['eef'].to(device)
+                name = data['name']
+
+                with torch.cuda.amp.autocast():
+                    outputs_onion, outputs_eef = self.model(inputs)
+                loss_onion = self.criterion(outputs_onion, onion)
+                loss_eef = self.criterion(outputs_eef, eef)
+
+                val_loss_onion.append(loss_onion.item())
+                val_loss_eef.append(loss_eef.item())
+                val_pred_onion.extend(torch.argmax(outputs_onion, axis=1).cpu().numpy().tolist())
+                val_pred_eef.extend(torch.argmax(outputs_eef, axis=1).cpu().numpy().tolist())
+                val_label_onion.extend(onion.cpu().numpy().tolist())
+                val_label_eef.extend(eef.cpu().numpy().tolist())
+                val_onion_dist.append(F.softmax(outputs_onion))
+                val_eef_dist.append(F.softmax(outputs_eef))
+
+                df = pd.DataFrame(list(zip(name,
+                                           torch.argmax(outputs_onion, axis=1).cpu().numpy(),
+                                           onion.cpu().numpy(),
+                                           torch.argmax(outputs_eef, axis=1).cpu().numpy(),
+                                           eef.cpu().numpy())),
+                                  columns=['name', 'pred_onion', 'real_onion', 'pred_eef', 'real_eef'])
+                val_result = pd.concat([val_result, df])
+
+        np.save('./dist/onion_dist.npy', torch.cat(val_onion_dist).cpu().numpy())
+        np.save('./dist/eef_dist.npy', torch.cat(val_eef_dist).cpu().numpy())
+
+        print(f'val onion acc: {round(get_stats(val_pred_onion, val_label_onion) * 100, 2)}% | '
+              f'val eef acc: {round(get_stats(val_pred_eef, val_label_eef) * 100, 2)}% | '
+              f'val onion loss: {round(np.mean(val_loss_onion), 3)} | '
+              f'val eef loss: {round(np.mean(val_loss_eef), 3)} | '
+              f'collapsed time: {round(time.time() - start_time, 1)}s | '
+              f'current time: {datetime.now().strftime("%H:%M:%S")}')
 
 
 class TrainAction(object):
@@ -261,7 +327,7 @@ class TrainAction(object):
                                                action.cpu().numpy()
                                                )),
                                       columns=['name', 'pred', 'real'])
-                    val_result = pd.concat([val_result, df], sort=False)
+                    val_result = pd.concat([val_result, df])
 
             print(f'epoch: {epoch} | '
                   f'train acc: {round(get_stats(train_pred, train_label) * 100, 2)}% | '
@@ -276,7 +342,7 @@ class TrainAction(object):
 
 if __name__ == '__main__':
     state = TrainState()
-    state.main()
-
+    # state.main(99)
+    state.test(160, './model/state')
     # action = TrainAction()
     # action.main()
