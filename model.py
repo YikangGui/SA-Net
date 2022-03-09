@@ -21,6 +21,17 @@ label_dict = {
     'atBin': 3
 }
 
+label_dict_new = {
+    'on': 0,
+    'ins': 1,
+    'at': 2
+}
+
+grasp_dict = {
+    'n': 0,
+    'y': 1
+}
+
 action_dict = {
     'Claim': 0,
     'Pick': 1,
@@ -286,6 +297,8 @@ class StateDetect(nn.Module):
         self.conv5 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
         self.pool3 = nn.MaxPool2d(2, 2)
 
+        # self.activation = nn.
+
         # self.fc1_1 = nn.Linear((32 * 24 * 24),
         #                        128)  # for input shape: [1, 3, 480, 640], the output shape is: [1, 32, 24, 24]
         self.fc1_1 = nn.Linear((32 * 37 * 60),
@@ -329,6 +342,68 @@ class StateDetect(nn.Module):
         x = self.dropout(F.leaky_relu(self.fc1_3(x)))
         x1 = self.fc1_4(x)  # for ee_loc
         x2 = self.fc1_5(x)  # for o_loc
+        # x1 = F.softmax(x1, dim=1)
+        # x2 = F.softmax(x2, dim=1)
+        return x1, x2
+
+
+class StateDetectNew(nn.Module):
+    def __init__(self):
+        super(StateDetectNew, self).__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=(3, 9), stride=1)
+        self.pool1 = nn.MaxPool2d(4, 3)
+        self.conv2 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.conv3 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.pool2 = nn.MaxPool2d(2, 3)
+        self.conv4 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.conv5 = nn.Conv2d(32, 32, kernel_size=(3, 9), stride=1)
+        self.pool3 = nn.MaxPool2d(2, 2)
+
+        # self.activation = nn.
+
+        # self.fc1_1 = nn.Linear((32 * 24 * 24),
+        #                        128)  # for input shape: [1, 3, 480, 640], the output shape is: [1, 32, 24, 24]
+        self.fc1_1 = nn.Linear((32 * 37 * 60),
+                               128)  # for input shape: [1, 3, 480, 640], the output shape is: [1, 32, 24, 24]
+        self.fc1_2 = nn.Linear(128, 64)
+        self.fc1_3 = nn.Linear(64, 32)
+        self.fc1_4 = nn.Linear(32, 3)  # for ee_loc
+        self.fc1_5 = nn.Linear(32, 2)  # for onion grasp or not
+
+        self.dropout = nn.Dropout(p=0.75)
+
+        self.init_weight()
+
+    def init_weight(self):
+        nn.init.kaiming_normal_(self.conv1.weight)
+        nn.init.kaiming_normal_(self.conv2.weight)
+        nn.init.kaiming_normal_(self.conv3.weight)
+        nn.init.kaiming_normal_(self.conv4.weight)
+        nn.init.kaiming_normal_(self.conv5.weight)
+        nn.init.kaiming_normal_(self.fc1_1.weight)
+        nn.init.kaiming_normal_(self.fc1_2.weight)
+        nn.init.kaiming_normal_(self.fc1_3.weight)
+        nn.init.kaiming_normal_(self.fc1_4.weight)
+        nn.init.kaiming_normal_(self.fc1_5.weight)
+
+    def forward(self, x):
+        x = F.leaky_relu(self.conv1(x))
+        x = self.pool1(x)
+        x = F.leaky_relu(self.conv2(x))
+        x = F.leaky_relu(self.conv3(x))
+        x = self.pool2(x)
+        x = F.leaky_relu(self.conv4(x))
+        x = F.leaky_relu(self.conv5(x))
+        x = self.pool3(x)  # (batch size, 32, 24, 24)
+
+        # x = x.view(-1, 32 * 24 * 24)  # Flatten layer
+        x = x.view(-1, 32 * 37 * 60)  # Flatten layer
+        # state_info = x.clone()
+        x = self.dropout(F.leaky_relu(self.fc1_1(x)))
+        x = self.dropout(F.leaky_relu(self.fc1_2(x)))
+        x = self.dropout(F.leaky_relu(self.fc1_3(x)))
+        x1 = self.fc1_4(x)  # for ee_loc
+        x2 = self.fc1_5(x)  # for grasp
         # x1 = F.softmax(x1, dim=1)
         # x2 = F.softmax(x2, dim=1)
         return x1, x2
@@ -406,8 +481,37 @@ class StateDataset(Dataset):
         name, o_loc, e_loc = self.labels.iloc[idx]
         img_name = os.path.join(self.rgb_dir, name)
         image = io.imread(img_name)
+        # depth_img = io.imread(depth_img_name)
+        # image = np.concatenate([image, depth_img]) # 4 * 1280* 720
         sample = {'image': image / 255 - 0.474, 'onion': np.array(label_dict[o_loc]),
                   'eef': np.array(label_dict[e_loc]), 'name': name}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+class StateDatasetNew(Dataset):
+    def __init__(self, csv_file, rgb_dir, transform=None, image_pool=None):
+        self.labels = pd.read_csv(csv_file, header=None)
+        self.rgb_dir = rgb_dir
+        self.transform = transform
+        self.image_pool = image_pool
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        name, e_loc, grasp = self.labels.iloc[idx]
+        img_name = os.path.join(self.rgb_dir, name)
+        image = io.imread(img_name)
+        # depth_img = io.imread(depth_img_name)
+        # image = np.concatenate([image, depth_img]) # 4 * 1280* 720
+        sample = {'image': image / 255 - 0.474, 'eef': np.array(label_dict_new[e_loc]), 'grasp': np.array(grasp_dict[grasp]), 'name': name}
 
         if self.transform:
             sample = self.transform(sample)
@@ -483,14 +587,14 @@ class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
 
     def __call__(self, sample):
-        image, onion, eef, name = sample['image'], sample['onion'], sample['eef'], sample['name']
+        image, grasp, eef, name = sample['image'], sample['grasp'], sample['eef'], sample['name']
 
         # swap color axis because
         # numpy image: H x W x C
         # torch image: C x H x W
         image = image.transpose((2, 0, 1))
         return {'image': torch.from_numpy(image),
-                'onion': torch.from_numpy(onion),
+                'grasp': torch.from_numpy(grasp),
                 'eef': torch.from_numpy(eef),
                 'name': name}
 
